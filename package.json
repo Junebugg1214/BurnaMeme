@@ -1,6 +1,4 @@
 {
-  "name": "burnaai-meme-factory",
-  "version": "1.0.0",
   "type": "module",
   "engines": { "node": ">=20" },
   "scripts": {
@@ -25,3 +23,4 @@
     "typescript": "^5.5.4"
   }
 }
+
