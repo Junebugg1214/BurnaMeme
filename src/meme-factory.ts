@@ -12,7 +12,7 @@ import { writeToPath } from "fast-csv";
 /**
  * Model & IO
  */
-const GEN_MODEL = "gemini-2.5-flash-image-preview";
+const GEN_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash-image-preview";
 const OUT_DIR = "output";
 const SCHEDULER_CSV = path.join(OUT_DIR, "scheduler.csv");
 
@@ -20,13 +20,13 @@ const SCHEDULER_CSV = path.join(OUT_DIR, "scheduler.csv");
  * Export presets per platform
  */
 const PRESETS = [
-  { key: "x", w: 1600, h: 900 },       // X/Twitter
-  { key: "linkedin", w: 1200, h: 627 },// LinkedIn
+  { key: "x", w: 1600, h: 900 },        // X/Twitter
+  { key: "linkedin", w: 1200, h: 627 }, // LinkedIn
   { key: "instagram", w: 1080, h: 1080 } // Instagram
 ] as const;
 
 /**
- * Default master size (only used as a fallback)
+ * Default master size (fallback only)
  */
 const MASTER_W = 1536;
 const MASTER_H = 1536;
@@ -75,7 +75,6 @@ const model = genAI.getGenerativeModel({ model: GEN_MODEL });
  */
 const LOGO_PATH = process.env.BURNA_LOGO_PATH || "";
 const WM_HEX = (process.env.BURNA_WATERMARK_HEX || "#FFFFFF").trim();
-
 // Clamp logo width percent between 5% and 40% (default 16%)
 const LOGO_MAX_PCT = Math.min(
   0.4,
@@ -85,7 +84,7 @@ const LOGO_MAX_PCT = Math.min(
 /**
  * Meme templates
  */
-type MemeTemplate = { title: string; premise: string; caption: string; tone?: string; };
+type MemeTemplate = { title: string; premise: string; caption: string; tone?: string };
 
 const TEMPLATES: MemeTemplate[] = [
   { title: "Prior-Auth Maze", premise: "A labyrinth labeled 'Prior Auth', clinician holding stack of forms, AI guide pointing a shortcut", caption: "When prior auth tries to turn Tuesday into next month.", tone: "witty" },
@@ -121,7 +120,7 @@ const TEMPLATES: MemeTemplate[] = [
 ];
 
 /**
- * Prompt builder (safe string usage)
+ * Prompt builder
  */
 function buildPrompt(t: MemeTemplate, seed?: number) {
   return [
@@ -137,22 +136,18 @@ function buildPrompt(t: MemeTemplate, seed?: number) {
 }
 
 /**
- * Call Gemini model; parse inline image
+ * Gemini: generate image and extract inline base64
  */
 async function generateImageBase64(prompt: string): Promise<string> {
   const res = await model.generateContent(prompt);
   const parts = res.response.candidates?.[0]?.content?.parts ?? [];
-  const inline = (parts as any[]).find((p) => (p as any).inlineData)?.inlineData as any;
-  if (!inline?.data) {
-    throw new Error("No inline image data returned from model");
-  }
+  const inline = (parts as any[]).find(p => (p as any).inlineData)?.inlineData as any;
+  if (!inline?.data) throw new Error("No inline image data returned from model");
   return inline.data; // base64-encoded PNG
 }
 
 /**
- * Logo preprocessor
- * - Accept any input format (jpeg/png/svg/…) and convert to PNG
- * - Resize to ≤ LOGO_MAX_PCT of base width, preserve aspect ratio
+ * Logo preprocessor: any format → PNG, ≤ LOGO_MAX_PCT width
  */
 type PreparedLogo = { buf: Buffer; w: number; h: number } | null;
 
@@ -183,13 +178,7 @@ async function loadLogoForBaseWidth(baseWidth: number): Promise<PreparedLogo> {
 /**
  * Watermark SVG sized to actual base image
  */
-function watermarkSvg(
-  width: number,
-  height: number,
-  text: string,
-  hex: string,
-  opacity = 0.7
-) {
+function watermarkSvg(width: number, height: number, text: string, hex: string, opacity = 0.7) {
   const x = Math.max(0, width - WM_MARGIN);
   const y = Math.max(0, height - WM_MARGIN);
   const svg = `
@@ -208,10 +197,11 @@ function watermarkSvg(
 }
 
 /**
- * Brand and export in platform sizes
- * - Reads actual base size from metadata
- * - Logo is preprocessed (any format → PNG), scaled to ≤ LOGO_MAX_PCT * width
- * - Watermark SVG matches the base image size (never larger)
+ * Brand and export
+ * - Detect actual base size
+ * - Overlay (preprocessed) logo bottom-right
+ * - Add text watermark
+ * - Export platform sizes
  */
 async function brandAndExport(masterPng: Buffer, baseSlug: string) {
   let img = sharp(masterPng).ensureAlpha();
@@ -219,7 +209,7 @@ async function brandAndExport(masterPng: Buffer, baseSlug: string) {
   const W = meta.width ?? MASTER_W;
   const H = meta.height ?? MASTER_H;
 
-  // Logo overlay (bottom-right, with margin)
+  // Logo bottom-right
   const prepared = await loadLogoForBaseWidth(W);
   if (prepared) {
     const left = Math.max(0, W - prepared.w - WM_MARGIN);
@@ -227,7 +217,7 @@ async function brandAndExport(masterPng: Buffer, baseSlug: string) {
     img = await img.composite([{ input: prepared.buf, left, top }]);
   }
 
-  // Text watermark
+  // Watermark text
   const wmSvg = watermarkSvg(W, H, WATERMARK_TEXT, WM_HEX, WM_OPACITY);
   img = await img.composite([{ input: wmSvg }]);
 
@@ -235,7 +225,7 @@ async function brandAndExport(masterPng: Buffer, baseSlug: string) {
 
   // Export platform sizes
   await Promise.all(
-    PRESETS.map(async (p) => {
+    PRESETS.map(async p => {
       const outDir = path.join(OUT_DIR, p.key);
       await fs.mkdir(outDir, { recursive: true });
       const outPath = path.join(outDir, `${baseSlug}_${p.key}.png`);
@@ -280,7 +270,6 @@ function buildScheduleRows(
     const date = dayjs(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
     if (!date.isValid()) break;
 
-    // Rotate platforms daily (1 per day)
     const platform = PRESETS[(day - START_DAY) % PRESETS.length].key;
 
     rows.push({
@@ -353,8 +342,7 @@ async function main() {
   console.log(`\n✅ Done. Images in ${OUT_DIR}/[x|linkedin|instagram]. Schedule: ${SCHEDULER_CSV}`);
 }
 
-main().catch((err) => {
+main().catch(err => {
   console.error(err);
   process.exit(1);
 });
-
