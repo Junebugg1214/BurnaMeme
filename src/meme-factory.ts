@@ -1,0 +1,243 @@
+import "dotenv/config";
+import arg from "arg";
+import fs from "fs/promises";
+import path from "path";
+import dayjs from "dayjs";
+import pLimit from "p-limit";
+import slugify from "slugify";
+import sharp from "sharp";
+import { GoogleGenerativeAI } from "@google/generative-ai";
+
+const GEN_MODEL = "gemini-2.5-flash-image-preview";
+const OUT_DIR = "output";
+const SCHEDULER_CSV = path.join(OUT_DIR, "scheduler.csv");
+
+const PRESETS = [
+  { key: "x", w: 1600, h: 900 },
+  { key: "linkedin", w: 1200, h: 627 },
+  { key: "instagram", w: 1080, h: 1080 }
+];
+
+const MASTER_W = 1536;
+const MASTER_H = 1536;
+
+const WATERMARK_TEXT = "BurnaAI";
+const WM_FONT_SIZE = 42;
+const WM_OPACITY = 0.7;
+const WM_MARGIN = 28;
+
+const args = arg({
+  "--count": Number,
+  "--month": Number,
+  "--year": Number,
+  "--start-day": Number,
+  "--dry-run": Boolean,
+  "--seed": Number,
+  "--concurrency": Number
+});
+
+const COUNT = args["--count"] ?? 30;
+const MONTH = args["--month"] ?? 9;
+const YEAR = args["--year"] ?? 2025;
+const START_DAY = args["--start-day"] ?? 1;
+const DRY_RUN = !!args["--dry-run"];
+const CONCURRENCY = args["--concurrency"] ?? parseInt(process.env.CONCURRENCY ?? "3", 10);
+
+const API_KEY = process.env.GEMINI_API_KEY;
+if (!API_KEY) {
+  console.error("Missing GEMINI_API_KEY in env");
+  process.exit(1);
+}
+const genAI = new GoogleGenerativeAI(API_KEY);
+const model = genAI.getGenerativeModel({ model: GEN_MODEL });
+
+const LOGO_PATH = process.env.BURNA_LOGO_PATH || "";
+const WM_HEX = (process.env.BURNA_WATERMARK_HEX || "#FFFFFF").trim();
+
+type MemeTemplate = { title: string; premise: string; caption: string; tone?: string; };
+
+const TEMPLATES: MemeTemplate[] = [
+  { title: "Prior-Auth Maze", premise: "A labyrinth labeled 'Prior Auth', clinician holding stack of forms, AI guide pointing a shortcut", caption: "When prior auth tries to turn Tuesday into next month.", tone: "witty" },
+  { title: "Note Bloat vs Clinical Signal", premise: "Two jars: 'Noise' overflowing with repeated phrases vs 'Signal' small but glowing; a filter labeled 'BurnaAI'", caption: "Cut the fluff. Keep the medicine.", tone: "clever" },
+  { title: "CDI Treasure Hunt", premise: "Pirate map across a patient chart with hidden HCCs as gold coins; AI compass points to missed codes", caption: "Found revenue where the ICDs hide.", tone: "playful" },
+  { title: "Weekend On-Call", premise: "Clinician sipping coffee while AI writes a clean SOAP note on a floating screen", caption: "On-call doesn’t have to mean on-keyboard.", tone: "calm" },
+  { title: "CTCAE Boss Fight", premise: "Video-game boss labeled 'AE Grading'; AI teammate highlights CTCAE criteria and recommended actions", caption: "Grading AEs like it’s level 10 loot.", tone: "gamer" },
+  { title: "EHR Tabs Overload", premise: "100 browser/EHR tabs; AI bundles them into one sane timeline", caption: "From tab-sprawl to clinical story.", tone: "relief" },
+  { title: "Discharge Ping-Pong", premise: "Patient discharge tasks bouncing between teams; AI smooths a conveyor to 'Home'", caption: "From ping-pong to touchdown.", tone: "optimistic" },
+  { title: "Readmission Crystal Ball", premise: "Clinician with a crystal ball predicting readmission risk; AI annotates the factors", caption: "Predict. Prevent. Repeat.", tone: "confident" },
+  { title: "Dictation Gremlins", premise: "Little gremlins turning voice notes into gibberish; AI cleans and structures them", caption: "From mumbles to medicine.", tone: "funny" },
+  { title: "Compliance Copilot", premise: "AI checklist hovering next to chart: HIPAA, SOC2, audit-ready", caption: "Ship fast, document faster.", tone: "assured" },
+  { title: "Vitals to Value", premise: "Vitals and labs pouring into a funnel, out comes 'Clinical Intelligence'", caption: "Data in. Insight out.", tone: "crisp" },
+  { title: "Revenue Crisis Circle", premise: "A cycle diagram with leakage points; AI patches each", caption: "Close the loop. Keep the revenue.", tone: "direct" },
+  { title: "Team Huddle Buff", premise: "Clinician huddle with AI speech bubbles summarizing each patient in 1 line", caption: "Huddles that actually save time.", tone: "practical" },
+  { title: "Denial Dragon", premise: "A dragon labeled 'Claim Denials'; AI shields made of CDI rules", caption: "Slay denials with documentation.", tone: "epic" },
+  { title: "Note Time Reclaimed", premise: "Clock with reclaimed slices going to 'Patients', 'Teaching', 'Life'", caption: "Give time back to care.", tone: "uplifting" },
+  { title: "Interoperability Tetris", premise: "Blocks labeled HL7, FHIR, CCD fitting into a clean timeline", caption: "All the pieces, finally fitting.", tone: "nerdy" },
+  { title: "Curbside Consult, Upgraded", premise: "Hallway consult; AI instantly drafts follow-up tasks & orders", caption: "Fewer scribbles, more care.", tone: "friendly" },
+  { title: "Clinic Flow Zen", premise: "Chaotic waiting room transforms to calm flow with AI triage signs", caption: "Queue less. Care more.", tone: "zen" },
+  { title: "Auditor Ready", premise: "A magnifying glass labeled 'Auditor' finds green checks everywhere", caption: "Audit-ready by design.", tone: "confident" },
+  { title: "Sepsis Early Signal", premise: "Faint red signal in labs becomes clear alert; timely orders", caption: "Catch the whisper before the shout.", tone: "serious" },
+  { title: "ICU Hand-off Clarity", premise: "Messy hand-off notes become one crisp card", caption: "Shift change, not story change.", tone: "clinical" },
+  { title: "Coding Crosswalk", premise: "Road signs mapping symptoms → diagnoses → CPT/ICD", caption: "Shortest path to clean claims.", tone: "precise" },
+  { title: "Order Sets That Learn", premise: "AI adjusts order sets based on real outcomes", caption: "Practice-aware, patient-first.", tone: "smart" },
+  { title: "Rounds, But Faster", premise: "Progress notes auto-summarized with deltas highlighted", caption: "See what changed, not just what’s there.", tone: "efficient" },
+  { title: "Prior Auth Speedrun", premise: "Speedrun timer; AI assembles perfect prior-auth packet", caption: "Any% prior-auth PB.", tone: "gamer" },
+  { title: "Query Whisperer", premise: "CDI queries phrased politely and precisely", caption: "Ask once, get clarity.", tone: "polite" },
+  { title: "Safety Net", premise: "AI catches missed allergies/med interactions", caption: "Because zero is the goal.", tone: "safety" },
+  { title: "Clinic Growth Flywheel", premise: "Time saved → more patients → better revenue → reinvest in care", caption: "Momentum you can measure.", tone: "growth" },
+  { title: "Even If You Have Abridge", premise: "Two tools shaking hands; AI layer adds revenue + compliance", caption: "We play nice—with upside.", tone: "collegial" },
+  { title: "Ambient That Understands", premise: "Mic turns into structured SOAP with HCC hints", caption: "From talk to billable truth.", tone: "matter-of-fact" }
+];
+
+function buildPrompt(t: MemeTemplate, seed?: number) {
+  return [
+    \`Create a clean, witty, high-contrast meme-style illustration (vector-like, legible text) about clinical workflows.\`,
+    \`Base canvas ${MASTER_W}x${MASTER_H}.\`,
+    \`Premise: ${t.premise}.\`,
+    \`Overlay the main meme caption as big readable text: "${t.caption}".\`,
+    \`Style: modern, minimal, YC-like; limited colors; avoid tiny text; high legibility; subtle clinical motifs.\`,
+    \`Include space bottom-right for a logo and watermark.\`,
+    \`Tone: ${t.tone || "witty"}.\`,
+    seed ? \`Seed: ${seed}\` : ""
+  ].filter(Boolean).join("\\n");
+}
+
+async function generateImageBase64(prompt: string): Promise<string> {
+  const res = await model.generateContent([{ role: "user", parts: [{ text: prompt }] }]);
+  const parts = res.response.candidates?.[0]?.content?.parts ?? [];
+  const inline = (parts as any[]).find(p => (p as any).inlineData)?.inlineData as any;
+  if (!inline?.data) throw new Error("No inline image data returned from model");
+  return inline.data;
+}
+
+function watermarkSvg(width: number, height: number, text: string, hex: string, opacity = 0.7) {
+  const x = width - WM_MARGIN;
+  const y = height - WM_MARGIN;
+  const svg = \`
+<svg width="\${width}" height="\${height}">
+  <style>
+    .wm { font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; font-size: \${WM_FONT_SIZE}px; fill: \${hex}; opacity:\${opacity}; }
+  </style>
+  <text x="\${x}" y="\${y}" text-anchor="end" class="wm">\${text}</text>
+</svg>\`;
+  return Buffer.from(svg);
+}
+
+async function brandAndExport(masterPng: Buffer, baseSlug: string) {
+  let img = sharp(masterPng).ensureAlpha();
+
+  if (LOGO_PATH) {
+    const logo = sharp(LOGO_PATH).png();
+    const logoMeta = await logo.metadata();
+    const scaledW = Math.round(MASTER_W * 0.16);
+    const scale = scaledW / (logoMeta.width || scaledW);
+    const scaledH = Math.round((logoMeta.height || scaledW) * scale);
+    const logoBuf = await logo.resize({ width: scaledW, height: scaledH }).toBuffer();
+
+    img = await img
+      .composite([{ input: logoBuf, gravity: "southeast" }])
+      .extend({ bottom: WM_MARGIN, right: WM_MARGIN, background: { r: 0, g: 0, b: 0, alpha: 0 }});
+  }
+
+  const wmSvg = watermarkSvg(MASTER_W, MASTER_H, WATERMARK_TEXT, WM_HEX, WM_OPACITY);
+  img = await img.composite([{ input: wmSvg }]);
+
+  const brandedMaster = await img.png().toBuffer();
+
+  const outputs: { platform: string; path: string }[] = [];
+  await Promise.all(PRESETS.map(async p => {
+    const outDir = path.join(OUT_DIR, p.key);
+    await fs.mkdir(outDir, { recursive: true });
+    const outPath = path.join(outDir, \`\${baseSlug}_\${p.key}.png\`);
+    await sharp(brandedMaster).resize(p.w, p.h, { fit: "cover" }).png().toFile(outPath);
+    outputs.push({ platform: p.key, path: outPath });
+  }));
+  return outputs;
+}
+
+import { writeToPath } from "fast-csv";
+
+type ScheduleRow = { date: string; time: string; platform: string; filename: string; caption: string; alt_text: string; };
+
+async function writeScheduler(rows: ScheduleRow[]) {
+  await fs.mkdir(OUT_DIR, { recursive: true });
+  return new Promise<void>((resolve, reject) => {
+    const stream = writeToPath(SCHEDULER_CSV, rows, { headers: true });
+    stream.on("error", reject);
+    stream.on("finish", () => resolve());
+  });
+}
+
+function buildScheduleRows(
+  items: { slug: string; caption: string; alt: string }[],
+  month: number,
+  year: number
+): ScheduleRow[] {
+  const rows: ScheduleRow[] = [];
+  let day = START_DAY;
+  for (const it of items) {
+    const date = dayjs(\`\${year}-\${String(month).padStart(2,"0")}-\${String(day).padStart(2,"0")}\`);
+    if (!date.isValid()) break;
+    const platform = PRESETS[(day - START_DAY) % PRESETS.length].key;
+    rows.push({
+      date: date.format("YYYY-MM-DD"),
+      time: "09:15",
+      platform,
+      filename: \`\${platform}/\${it.slug}_\${platform}.png\`,
+      caption: it.caption,
+      alt_text: it.alt
+    });
+    day += 1;
+  }
+  return rows;
+}
+
+async function main() {
+  await fs.mkdir(OUT_DIR, { recursive: true });
+
+  const pick = TEMPLATES.slice(0, Math.min(COUNT, TEMPLATES.length));
+  const limit = pLimit(CONCURRENCY);
+
+  const results: { slug: string; caption: string; alt: string }[] = [];
+
+  await Promise.all(pick.map((t, idx) => limit(async () => {
+    const prompt = buildPrompt(t, args["--seed"] ? (args["--seed"] as number) + idx : undefined);
+    const slug = slugify(t.title.toLowerCase(), { strict: true, trim: true });
+    const baseSlug = \`\${dayjs().format("YYYYMMDD")}_\${slug}\`;
+
+    console.log(\`[\${idx+1}/\${pick.length}] Generating: \${t.title}\`);
+
+    if (DRY_RUN) {
+      results.push({
+        slug: baseSlug,
+        caption: \`💡 \${t.caption}  \\n#BurnaAI #ClinicalWorkflows #HealthcareAI\`,
+        alt: \`\${t.title}: \${t.premise}\`
+      });
+      return;
+    }
+
+    const b64 = await generateImageBase64(prompt);
+    const png = Buffer.from(b64, "base64");
+
+    const rawDir = path.join(OUT_DIR, "_raw");
+    await fs.mkdir(rawDir, { recursive: true });
+    await fs.writeFile(path.join(rawDir, \`\${baseSlug}_master.png\`), png);
+
+    await brandAndExport(png, baseSlug);
+
+    const caption = \`💡 \${t.caption}\\n\\nBuilt with #BurnaAI — clinical intelligence that saves time, boosts revenue, and keeps you compliant.\\n#HealthcareAI #ClinicalWorkflows #MedTwitter #HIT #CDI\`;
+    const alt = \`\${t.title}: \${t.premise}. Caption: \${t.caption}.\`;
+
+    results.push({ slug: baseSlug, caption, alt });
+  })));
+
+  const rows = buildScheduleRows(results, MONTH, YEAR);
+  await writeScheduler(rows);
+
+  console.log(\`\\n✅ Done. Images in \${OUT_DIR}/[x|linkedin|instagram]. Schedule: \${SCHEDULER_CSV}\`);
+}
+
+main().catch(err => {
+  console.error(err);
+  process.exit(1);
+});

@@ -1,0 +1,24 @@
+{
+  "name": "burnaai-meme-factory",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsx src/meme-factory.ts",
+    "gen": "tsx src/meme-factory.ts --count 30 --month 9 --year 2025",
+    "dry": "tsx src/meme-factory.ts --count 5 --dry-run"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.21.0",
+    "arg": "^5.0.2",
+    "dayjs": "^1.11.11",
+    "fast-csv": "^5.0.1",
+    "p-limit": "^6.1.0",
+    "slugify": "^1.6.6",
+    "sharp": "^0.33.4"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4"
+  }
+}
