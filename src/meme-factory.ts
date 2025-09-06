@@ -90,7 +90,6 @@ const TEMPLATES: MemeTemplate[] = [
   { title: "Ambient That Understands", premise: "Mic turns into structured SOAP with HCC hints", caption: "From talk to billable truth.", tone: "matter-of-fact" }
 ];
 
-// SAFER: Only use template literals when interpolating; join with real newlines
 function buildPrompt(t: MemeTemplate, seed?: number) {
   return [
     "Create a clean, witty, high-contrast meme-style illustration (vector-like, legible text) about clinical workflows.",
@@ -104,7 +103,7 @@ function buildPrompt(t: MemeTemplate, seed?: number) {
   ].filter(Boolean).join("\n");
 }
 
-// ✔ Fix: call with a plain string; parse inline image from response parts
+// Call with plain string; parse inline image from response
 async function generateImageBase64(prompt: string): Promise<string> {
   const res = await model.generateContent(prompt);
   const parts = res.response.candidates?.[0]?.content?.parts ?? [];
