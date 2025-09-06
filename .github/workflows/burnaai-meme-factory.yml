@@ -54,7 +54,7 @@ jobs:
           .env
           EOF
 
-          # package.json (adds @types/node)
+
           cat <<'EOF' > package.json
           {
             "name": "burnaai-meme-factory",
@@ -71,6 +71,7 @@ jobs:
               "@google/generative-ai": "^0.21.0",
               "arg": "^5.0.2",
               "dayjs": "^1.11.11",
+              "dotenv": "^16.4.5",
               "fast-csv": "^5.0.1",
               "p-limit": "^6.1.0",
               "slugify": "^1.6.6",
@@ -83,6 +84,7 @@ jobs:
             }
           }
           EOF
+
 
           # tsconfig.json (use Node types)
           cat <<'EOF' > tsconfig.json
