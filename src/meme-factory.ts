@@ -91,15 +91,17 @@ const TEMPLATES: MemeTemplate[] = [
 
 function buildPrompt(t: MemeTemplate, seed?: number) {
   return [
-    \`Create a clean, witty, high-contrast meme-style illustration (vector-like, legible text) about clinical workflows.\`,
-    \`Base canvas ${MASTER_W}x${MASTER_H}.\`,
-    \`Premise: ${t.premise}.\`,
-    \`Overlay the main meme caption as big readable text: "${t.caption}".\`,
-    \`Style: modern, minimal, YC-like; limited colors; avoid tiny text; high legibility; subtle clinical motifs.\`,
-    \`Include space bottom-right for a logo and watermark.\`,
-    \`Tone: ${t.tone || "witty"}.\`,
-    seed ? \`Seed: ${seed}\` : ""
-  ].filter(Boolean).join("\\n");
+    "Create a clean, witty, high-contrast meme-style illustration (vector-like, legible text) about clinical workflows.",
+    `Base canvas ${MASTER_W}x${MASTER_H}.`,
+    `Premise: ${t.premise}.`,
+    `Overlay the main meme caption as big readable text: "${t.caption}".`,
+    "Style: modern, minimal, YC-like; limited colors; avoid tiny text; high legibility; subtle clinical motifs.",
+    "Include space bottom-right for a logo and watermark.",
+    `Tone: ${t.tone || "witty"}.`,
+    seed ? `Seed: ${seed}` : ""
+  ]
+    .filter(Boolean)
+    .join("\n");
 }
 
 async function generateImageBase64(prompt: string): Promise<string> {
