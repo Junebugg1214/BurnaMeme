@@ -54,12 +54,13 @@ jobs:
           .env
           EOF
 
-          # package.json
+          # package.json (adds @types/node)
           cat <<'EOF' > package.json
           {
             "name": "burnaai-meme-factory",
             "version": "1.0.0",
             "type": "module",
+            "engines": { "node": ">=20" },
             "scripts": {
               "build": "tsc",
               "start": "tsx src/meme-factory.ts",
@@ -76,19 +77,22 @@ jobs:
               "sharp": "^0.33.4"
             },
             "devDependencies": {
+              "@types/node": "^20.14.9",
               "tsx": "^4.19.1",
               "typescript": "^5.5.4"
             }
           }
           EOF
 
-          # tsconfig.json
+          # tsconfig.json (use Node types)
           cat <<'EOF' > tsconfig.json
           {
             "compilerOptions": {
               "target": "ES2022",
               "module": "ES2022",
               "moduleResolution": "Bundler",
+              "types": ["node"],
+              "lib": ["ES2022"],
               "esModuleInterop": true,
               "strict": true,
               "outDir": "dist",
@@ -112,7 +116,7 @@ jobs:
           Put your transparent PNG logo here as 'burnaai_logo.png' to brand outputs.
           EOF
 
-          # src/meme-factory.ts
+          # src/meme-factory.ts (fixed Node types, Buffer, SDK call)
           cat <<'EOF' > src/meme-factory.ts
           import "dotenv/config";
           import arg from "arg";
@@ -206,7 +210,6 @@ jobs:
             { title: "Ambient That Understands", premise: "Mic turns into structured SOAP with HCC hints", caption: "From talk to billable truth.", tone: "matter-of-fact" }
           ];
 
-          // SAFE: only use template literals when interpolating; join with real newlines
           function buildPrompt(t: MemeTemplate, seed?: number) {
             return [
               "Create a clean, witty, high-contrast meme-style illustration (vector-like, legible text) about clinical workflows.",
@@ -220,12 +223,13 @@ jobs:
             ].filter(Boolean).join("\n");
           }
 
+          // Call with plain string; parse inline image from response
           async function generateImageBase64(prompt: string): Promise<string> {
-            const res = await model.generateContent([{ role: "user", parts: [{ text: prompt }] }]);
+            const res = await model.generateContent(prompt);
             const parts = res.response.candidates?.[0]?.content?.parts ?? [];
             const inline = (parts as any[]).find(p => (p as any).inlineData)?.inlineData as any;
             if (!inline?.data) throw new Error("No inline image data returned from model");
-            return inline.data;
+            return inline.data; // base64 PNG
           }
 
           function watermarkSvg(width: number, height: number, text: string, hex: string, opacity = 0.7) {
@@ -357,12 +361,28 @@ jobs:
           });
           EOF
 
-          # Commit only if there are changes
+      - name: Install deps (seed)
+        if: ${{ inputs.mode == 'seed' }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: npm install (seed)
+        if: ${{ inputs.mode == 'seed' }}
+        run: npm i
+      - name: Type check (seed)
+        if: ${{ inputs.mode == 'seed' }}
+        run: npx tsc --noEmit
+
+      - name: Commit seeded files
+        if: ${{ inputs.mode == 'seed' }}
+        shell: bash
+        run: |
+          set -euo pipefail
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           if ! git diff --quiet; then
             git add .
-            git commit -m "chore: seed BurnaAI Meme Factory"
+            git commit -m "chore: seed BurnaAI Meme Factory (fixed Node types, SDK call)"
             git push
           else
             echo "No changes to commit (seed)."
@@ -417,5 +437,3 @@ jobs:
           else
             echo "No changes to commit (generate)."
           fi
-
-
