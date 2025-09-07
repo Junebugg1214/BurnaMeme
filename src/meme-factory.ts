@@ -26,7 +26,7 @@ const PRESETS = [
 ] as const;
 
 /**
- * Default master size (fallback only)
+ * Default master size (fallback only; we always brand after resize per platform)
  */
 const MASTER_W = 1536;
 const MASTER_H = 1536;
@@ -34,10 +34,10 @@ const MASTER_H = 1536;
 /**
  * Branding settings
  */
-const WATERMARK_TEXT = "BurnaAI";
-const WM_FONT_SIZE = 42;
-const WM_OPACITY = 0.7;
-const WM_MARGIN = 28;
+const WATERMARK_TEXT = process.env.BURNA_WATERMARK_TEXT ?? "BurnaAI";
+const WM_FONT_SIZE = Number(process.env.BURNA_WM_FONT_SIZE ?? "42");
+const WM_OPACITY = Number(process.env.BURNA_WM_OPACITY ?? "0.7");
+const WM_MARGIN = Number(process.env.BURNA_WM_MARGIN ?? "28");
 
 /**
  * CLI args
@@ -72,8 +72,10 @@ const model = genAI.getGenerativeModel({ model: GEN_MODEL });
 
 /**
  * Logo config
+ * - Default path allows branding even if no repo var is set.
+ * - For you: set BURNA_LOGO_PATH=branding/zolvecare_logo.PNG in repo variables.
  */
-const LOGO_PATH = process.env.BURNA_LOGO_PATH || "";
+const LOGO_PATH = process.env.BURNA_LOGO_PATH || "./branding/burnaai_logo.png";
 const WM_HEX = (process.env.BURNA_WATERMARK_HEX || "#FFFFFF").trim();
 // Clamp logo width percent between 5% and 40% (default 16%)
 const LOGO_MAX_PCT = Math.min(
@@ -120,7 +122,7 @@ const TEMPLATES: MemeTemplate[] = [
 ];
 
 /**
- * Prompt builder
+ * Prompt builder (with hardening against platform/third-party logos)
  */
 function buildPrompt(t: MemeTemplate, seed?: number) {
   return [
@@ -129,7 +131,9 @@ function buildPrompt(t: MemeTemplate, seed?: number) {
     `Premise: ${t.premise}.`,
     `Overlay the main meme caption as big readable text: "${t.caption}".`,
     "Style: modern, minimal, YC-like; limited colors; avoid tiny text; high legibility; subtle clinical motifs.",
-    "Include space bottom-right for a logo and watermark.",
+    // Hardening: block platform/third-party marks
+    "Do not include any third-party logos, brand marks, or social media icons (X/Twitter, LinkedIn, Facebook, TikTok, Instagram), and no platform watermarks. Leave space bottom-right for our overlay only.",
+    "Keep the composition simple and uncluttered; focus on the concept, not UI chrome.",
     `Tone: ${t.tone || "witty"}.`,
     seed ? `Seed: ${seed}` : ""
   ].filter(Boolean).join("\n");
@@ -140,6 +144,11 @@ function buildPrompt(t: MemeTemplate, seed?: number) {
  */
 async function generateImageBase64(prompt: string): Promise<string> {
   const res = await model.generateContent(prompt);
+  // Optional visibility/debug
+  try {
+    // eslint-disable-next-line no-console
+    console.log("served_model:", (res as any)?.response?.model ?? "(unknown)");
+  } catch {}
   const parts = res.response.candidates?.[0]?.content?.parts ?? [];
   const inline = (parts as any[]).find(p => (p as any).inlineData)?.inlineData as any;
   if (!inline?.data) throw new Error("No inline image data returned from model");
@@ -197,42 +206,42 @@ function watermarkSvg(width: number, height: number, text: string, hex: string, 
 }
 
 /**
- * Brand and export
- * - Detect actual base size
- * - Overlay (preprocessed) logo bottom-right
- * - Add text watermark
- * - Export platform sizes
+ * Brand and export per-platform
+ * - Resize/crop to platform first
+ * - Then overlay logo + watermark (avoids later cropping off your logo)
  */
 async function brandAndExport(masterPng: Buffer, baseSlug: string) {
-  let img = sharp(masterPng).ensureAlpha();
-  const meta = await img.metadata();
-  const W = meta.width ?? MASTER_W;
-  const H = meta.height ?? MASTER_H;
-
-  // Logo bottom-right
-  const prepared = await loadLogoForBaseWidth(W);
-  if (prepared) {
-    const left = Math.max(0, W - prepared.w - WM_MARGIN);
-    const top = Math.max(0, H - prepared.h - WM_MARGIN);
-    img = await img.composite([{ input: prepared.buf, left, top }]);
-  }
-
-  // Watermark text
-  const wmSvg = watermarkSvg(W, H, WATERMARK_TEXT, WM_HEX, WM_OPACITY);
-  img = await img.composite([{ input: wmSvg }]);
-
-  const brandedMaster = await img.png().toBuffer();
-
-  // Export platform sizes
   await Promise.all(
-    PRESETS.map(async p => {
+    PRESETS.map(async (p) => {
+      // 1) Resize/crop for this platform
+      let canvas = sharp(masterPng).ensureAlpha().resize(p.w, p.h, { fit: "cover", position: "centre" });
+
+      // 2) Inspect actual size (should match preset, but read to be safe)
+      const meta = await canvas.metadata();
+      const W = meta.width ?? p.w;
+      const H = meta.height ?? p.h;
+
+      // 3) Prepare logo sized for this export
+      const prepared = await loadLogoForBaseWidth(W);
+
+      // 4) Compose overlays
+      const comps: sharp.OverlayOptions[] = [];
+      if (prepared) {
+        comps.push({
+          input: prepared.buf,
+          left: Math.max(0, W - prepared.w - WM_MARGIN),
+          top: Math.max(0, H - prepared.h - WM_MARGIN)
+        });
+      }
+      comps.push({ input: watermarkSvg(W, H, WATERMARK_TEXT, WM_HEX, WM_OPACITY) });
+
+      canvas = await canvas.composite(comps);
+
+      // 5) Save
       const outDir = path.join(OUT_DIR, p.key);
       await fs.mkdir(outDir, { recursive: true });
       const outPath = path.join(outDir, `${baseSlug}_${p.key}.png`);
-      await sharp(brandedMaster)
-        .resize(p.w, p.h, { fit: "cover", position: "centre" })
-        .png()
-        .toFile(outPath);
+      await canvas.png().toFile(outPath);
       console.log(`  → ${p.key}: ${outPath}`);
     })
   );
@@ -319,10 +328,12 @@ async function main() {
           const b64 = await generateImageBase64(prompt);
           const png = Buffer.from(b64, "base64");
 
+          // Save master for traceability
           const rawDir = path.join(OUT_DIR, "_raw");
           await fs.mkdir(rawDir, { recursive: true });
           await fs.writeFile(path.join(rawDir, `${baseSlug}_master.png`), png);
 
+          // Brand after per-platform resize
           await brandAndExport(png, baseSlug);
 
           const caption = `💡 ${t.caption}\n\nBuilt with #BurnaAI — clinical intelligence that saves time, boosts revenue, and keeps you compliant.\n#HealthcareAI #ClinicalWorkflows #MedTwitter #HIT #CDI`;
