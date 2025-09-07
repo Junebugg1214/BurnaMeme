@@ -9,39 +9,34 @@ import sharp from "sharp";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { writeToPath } from "fast-csv";
 
-/**
- * Model & IO
- */
+/** Model & IO */
 const GEN_MODEL = process.env.GEMINI_MODEL ?? "gemini-2.5-flash-image-preview";
 const OUT_DIR = "output";
 const SCHEDULER_CSV = path.join(OUT_DIR, "scheduler.csv");
 
-/**
- * Export presets per platform
- */
+/** Platform export presets */
 const PRESETS = [
-  { key: "x", w: 1600, h: 900 },        // X/Twitter
-  { key: "linkedin", w: 1200, h: 627 }, // LinkedIn
-  { key: "instagram", w: 1080, h: 1080 } // Instagram
+  { key: "x", w: 1600, h: 900 },        // X/Twitter 16:9
+  { key: "linkedin", w: 1200, h: 627 }, // LinkedIn 1.91:1
+  { key: "instagram", w: 1080, h: 1080 } // Instagram 1:1
 ] as const;
 
-/**
- * Default master size (fallback only; we always brand after resize per platform)
- */
+/** Master (only used to describe prompt / not for final crops) */
 const MASTER_W = 1536;
 const MASTER_H = 1536;
 
-/**
- * Branding settings
- */
+/** Branding */
 const WATERMARK_TEXT = process.env.BURNA_WATERMARK_TEXT ?? "BurnaAI";
 const WM_FONT_SIZE = Number(process.env.BURNA_WM_FONT_SIZE ?? "42");
-const WM_OPACITY = Number(process.env.BURNA_WM_OPACITY ?? "0.7");
-const WM_MARGIN = Number(process.env.BURNA_WM_MARGIN ?? "28");
+const WM_OPACITY   = Number(process.env.BURNA_WM_OPACITY   ?? "0.7");
+const WM_MARGIN    = Number(process.env.BURNA_WM_MARGIN    ?? "28");
 
-/**
- * CLI args
- */
+/** Export / cropping strategy */
+type ExportMode = "cover" | "contain" | "blurcontain";
+const EXPORT_MODE: ExportMode = (process.env.EXPORT_MODE as ExportMode) ?? "blurcontain";
+const EXPORT_BG_HEX = (process.env.EXPORT_BG_HEX ?? "#0A0F1C").trim();
+
+/** CLI args */
 const args = arg({
   "--count": Number,
   "--month": Number,
@@ -51,43 +46,26 @@ const args = arg({
   "--seed": Number,
   "--concurrency": Number
 });
-
-const COUNT = args["--count"] ?? 30;
-const MONTH = args["--month"] ?? 9;
-const YEAR = args["--year"] ?? 2025;
-const START_DAY = args["--start-day"] ?? 1;
-const DRY_RUN = !!args["--dry-run"];
+const COUNT      = args["--count"]      ?? 30;
+const MONTH      = args["--month"]      ?? 9;
+const YEAR       = args["--year"]       ?? 2025;
+const START_DAY  = args["--start-day"]  ?? 1;
+const DRY_RUN    = !!args["--dry-run"];
 const CONCURRENCY = args["--concurrency"] ?? parseInt(process.env.CONCURRENCY ?? "3", 10);
 
-/**
- * Gemini setup
- */
+/** Gemini */
 const API_KEY = process.env.GEMINI_API_KEY;
-if (!API_KEY) {
-  console.error("Missing GEMINI_API_KEY in env");
-  process.exit(1);
-}
+if (!API_KEY) { console.error("Missing GEMINI_API_KEY"); process.exit(1); }
 const genAI = new GoogleGenerativeAI(API_KEY);
 const model = genAI.getGenerativeModel({ model: GEN_MODEL });
 
-/**
- * Logo config
- * - Default path allows branding even if no repo var is set.
- * - For you: set BURNA_LOGO_PATH=branding/zolvecare_logo.PNG in repo variables.
- */
-const LOGO_PATH = process.env.BURNA_LOGO_PATH || "./branding/burnaai_logo.png";
-const WM_HEX = (process.env.BURNA_WATERMARK_HEX || "#FFFFFF").trim();
-// Clamp logo width percent between 5% and 40% (default 16%)
-const LOGO_MAX_PCT = Math.min(
-  0.4,
-  Math.max(0.05, Number(process.env.BURNA_LOGO_MAX_WIDTH_PCT ?? "0.16"))
-);
+/** Logo config (your new default path) */
+const LOGO_PATH = process.env.BURNA_LOGO_PATH || "branding/burnaai_logo_1024w.png";
+const WM_HEX    = (process.env.BURNA_WATERMARK_HEX || "#FFFFFF").trim();
+const LOGO_MAX_PCT = Math.min(0.4, Math.max(0.05, Number(process.env.BURNA_LOGO_MAX_WIDTH_PCT ?? "0.16")));
 
-/**
- * Meme templates
- */
+/** Templates */
 type MemeTemplate = { title: string; premise: string; caption: string; tone?: string };
-
 const TEMPLATES: MemeTemplate[] = [
   { title: "Prior-Auth Maze", premise: "A labyrinth labeled 'Prior Auth', clinician holding stack of forms, AI guide pointing a shortcut", caption: "When prior auth tries to turn Tuesday into next month.", tone: "witty" },
   { title: "Note Bloat vs Clinical Signal", premise: "Two jars: 'Noise' overflowing with repeated phrases vs 'Signal' small but glowing; a filter labeled 'BurnaAI'", caption: "Cut the fluff. Keep the medicine.", tone: "clever" },
@@ -121,9 +99,7 @@ const TEMPLATES: MemeTemplate[] = [
   { title: "Ambient That Understands", premise: "Mic turns into structured SOAP with HCC hints", caption: "From talk to billable truth.", tone: "matter-of-fact" }
 ];
 
-/**
- * Prompt builder (with hardening against platform/third-party logos)
- */
+/** Prompt (hardened) */
 function buildPrompt(t: MemeTemplate, seed?: number) {
   return [
     "Create a clean, witty, high-contrast meme-style illustration (vector-like, legible text) about clinical workflows.",
@@ -131,52 +107,39 @@ function buildPrompt(t: MemeTemplate, seed?: number) {
     `Premise: ${t.premise}.`,
     `Overlay the main meme caption as big readable text: "${t.caption}".`,
     "Style: modern, minimal, YC-like; limited colors; avoid tiny text; high legibility; subtle clinical motifs.",
-    // Hardening: block platform/third-party marks
-    "Do not include any third-party logos, brand marks, or social media icons (X/Twitter, LinkedIn, Facebook, TikTok, Instagram), and no platform watermarks. Leave space bottom-right for our overlay only.",
-    "Keep the composition simple and uncluttered; focus on the concept, not UI chrome.",
+    "Do not include any third-party logos, brand marks, or social media icons (X/Twitter, LinkedIn, Facebook, TikTok, Instagram). No platform watermarks. Leave space bottom-right for our overlay only.",
+    "Keep key text inside a centered 80% safe zone (avoid edges).",
     `Tone: ${t.tone || "witty"}.`,
     seed ? `Seed: ${seed}` : ""
   ].filter(Boolean).join("\n");
 }
 
-/**
- * Gemini: generate image and extract inline base64
- */
+/** Gemini image → base64 */
 async function generateImageBase64(prompt: string): Promise<string> {
   const res = await model.generateContent(prompt);
-  // Optional visibility/debug
-  try {
-    // eslint-disable-next-line no-console
-    console.log("served_model:", (res as any)?.response?.model ?? "(unknown)");
-  } catch {}
   const parts = res.response.candidates?.[0]?.content?.parts ?? [];
   const inline = (parts as any[]).find(p => (p as any).inlineData)?.inlineData as any;
   if (!inline?.data) throw new Error("No inline image data returned from model");
-  return inline.data; // base64-encoded PNG
+  return inline.data;
 }
 
-/**
- * Logo preprocessor: any format → PNG, ≤ LOGO_MAX_PCT width
- */
-type PreparedLogo = { buf: Buffer; w: number; h: number } | null;
+/** Helpers */
+function hexToRgba(hex: string, alpha = 1) {
+  const h = hex.replace("#", "");
+  const v = parseInt(h.length === 3 ? h.split("").map(c => c + c).join("") : h, 16);
+  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255, alpha };
+}
 
+type PreparedLogo = { buf: Buffer; w: number; h: number } | null;
 async function loadLogoForBaseWidth(baseWidth: number): Promise<PreparedLogo> {
   if (!LOGO_PATH) return null;
   try {
     const input = sharp(LOGO_PATH);
     const meta = await input.metadata();
-
     const targetW = Math.max(1, Math.round(baseWidth * LOGO_MAX_PCT));
     const ratio = meta.width && meta.width > 0 ? targetW / meta.width : 1;
-    const targetH = meta.height && meta.height > 0
-      ? Math.max(1, Math.round(meta.height * ratio))
-      : targetW; // fallback square
-
-    const buf = await input
-      .resize({ width: targetW, height: targetH, fit: "inside" })
-      .png()
-      .toBuffer();
-
+    const targetH = meta.height && meta.height > 0 ? Math.max(1, Math.round(meta.height * ratio)) : targetW;
+    const buf = await input.resize({ width: targetW, height: targetH, fit: "inside" }).png().toBuffer();
     return { buf, w: targetW, h: targetH };
   } catch (e) {
     console.warn("Logo preprocessing skipped:", (e as any)?.message ?? e);
@@ -184,9 +147,6 @@ async function loadLogoForBaseWidth(baseWidth: number): Promise<PreparedLogo> {
   }
 }
 
-/**
- * Watermark SVG sized to actual base image
- */
 function watermarkSvg(width: number, height: number, text: string, hex: string, opacity = 0.7) {
   const x = Math.max(0, width - WM_MARGIN);
   const y = Math.max(0, height - WM_MARGIN);
@@ -205,60 +165,56 @@ function watermarkSvg(width: number, height: number, text: string, hex: string, 
   return Buffer.from(svg);
 }
 
-/**
- * Brand and export per-platform
- * - Resize/crop to platform first
- * - Then overlay logo + watermark (avoids later cropping off your logo)
- */
+/** Brand & export (content-preserving) */
 async function brandAndExport(masterPng: Buffer, baseSlug: string) {
   await Promise.all(
     PRESETS.map(async (p) => {
-      // 1) Resize/crop for this platform
-      let canvas = sharp(masterPng).ensureAlpha().resize(p.w, p.h, { fit: "cover", position: "centre" });
+      let base: sharp.Sharp;
 
-      // 2) Inspect actual size (should match preset, but read to be safe)
-      const meta = await canvas.metadata();
+      if (EXPORT_MODE === "cover") {
+        base = sharp(masterPng).ensureAlpha().resize(p.w, p.h, { fit: "cover", position: "centre" });
+      } else if (EXPORT_MODE === "contain") {
+        base = sharp(masterPng).ensureAlpha().resize(p.w, p.h, {
+          fit: "contain",
+          background: hexToRgba(EXPORT_BG_HEX, 1)
+        });
+      } else {
+        const bg = await sharp(masterPng).ensureAlpha()
+          .resize(p.w, p.h, { fit: "cover", position: "centre" })
+          .blur(30).modulate({ saturation: 0.9, brightness: 0.95 }).toBuffer();
+        const fg = await sharp(masterPng).ensureAlpha()
+          .resize(p.w, p.h, { fit: "contain", background: { r:0,g:0,b:0,alpha:0 } }).toBuffer();
+        base = sharp(bg).composite([{ input: fg, gravity: "centre" }]);
+      }
+
+      const meta = await base.metadata();
       const W = meta.width ?? p.w;
       const H = meta.height ?? p.h;
 
-      // 3) Prepare logo sized for this export
-      const prepared = await loadLogoForBaseWidth(W);
-
-      // 4) Compose overlays
-      const comps: sharp.OverlayOptions[] = [];
-      if (prepared) {
-        comps.push({
-          input: prepared.buf,
-          left: Math.max(0, W - prepared.w - WM_MARGIN),
-          top: Math.max(0, H - prepared.h - WM_MARGIN)
+      const preparedLogo = await loadLogoForBaseWidth(W);
+      const overlays: sharp.OverlayOptions[] = [];
+      if (preparedLogo) {
+        overlays.push({
+          input: preparedLogo.buf,
+          left: Math.max(0, W - preparedLogo.w - WM_MARGIN),
+          top:  Math.max(0, H - preparedLogo.h - WM_MARGIN)
         });
       }
-      comps.push({ input: watermarkSvg(W, H, WATERMARK_TEXT, WM_HEX, WM_OPACITY) });
+      overlays.push({ input: watermarkSvg(W, H, WATERMARK_TEXT, WM_HEX, WM_OPACITY) });
 
-      canvas = await canvas.composite(comps);
+      const composed = await base.composite(overlays);
 
-      // 5) Save
       const outDir = path.join(OUT_DIR, p.key);
       await fs.mkdir(outDir, { recursive: true });
       const outPath = path.join(outDir, `${baseSlug}_${p.key}.png`);
-      await canvas.png().toFile(outPath);
+      await composed.png().toFile(outPath);
       console.log(`  → ${p.key}: ${outPath}`);
     })
   );
 }
 
-/**
- * Scheduler CSV
- */
-type ScheduleRow = {
-  date: string;
-  time: string;
-  platform: string;
-  filename: string;
-  caption: string;
-  alt_text: string;
-};
-
+/** Scheduler CSV */
+type ScheduleRow = { date: string; time: string; platform: string; filename: string; caption: string; alt_text: string; };
 async function writeScheduler(rows: ScheduleRow[]) {
   await fs.mkdir(OUT_DIR, { recursive: true });
   return new Promise<void>((resolve, reject) => {
@@ -267,20 +223,16 @@ async function writeScheduler(rows: ScheduleRow[]) {
     stream.on("finish", () => resolve());
   });
 }
-
 function buildScheduleRows(
   items: { slug: string; caption: string; alt: string }[],
-  month: number,
-  year: number
+  month: number, year: number
 ): ScheduleRow[] {
   const rows: ScheduleRow[] = [];
   let day = START_DAY;
   for (const it of items) {
-    const date = dayjs(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
+    const date = dayjs(`${year}-${String(month).padStart(2,"0")}-${String(day).padStart(2,"0")}`);
     if (!date.isValid()) break;
-
     const platform = PRESETS[(day - START_DAY) % PRESETS.length].key;
-
     rows.push({
       date: date.format("YYYY-MM-DD"),
       time: "09:15",
@@ -289,31 +241,26 @@ function buildScheduleRows(
       caption: it.caption,
       alt_text: it.alt
     });
-
     day += 1;
   }
   return rows;
 }
 
-/**
- * Main
- */
+/** Main */
 async function main() {
   await fs.mkdir(OUT_DIR, { recursive: true });
-
   const pick = TEMPLATES.slice(0, Math.min(COUNT, TEMPLATES.length));
   const limit = pLimit(CONCURRENCY);
-
   const results: { slug: string; caption: string; alt: string }[] = [];
 
   await Promise.all(
     pick.map((t, idx) =>
       limit(async () => {
-        const prompt = buildPrompt(t, args["--seed"] ? (args["--seed"] as number) + idx : undefined);
-        const slug = slugify(t.title.toLowerCase(), { strict: true, trim: true });
+        const prompt  = buildPrompt(t, args["--seed"] ? (args["--seed"] as number) + idx : undefined);
+        const slug    = slugify(t.title.toLowerCase(), { strict: true, trim: true });
         const baseSlug = `${dayjs().format("YYYYMMDD")}_${slug}`;
 
-        console.log(`[${idx + 1}/${pick.length}] Generating: ${t.title}`);
+        console.log(`[${idx+1}/${pick.length}] Generating: ${t.title}`);
 
         if (DRY_RUN) {
           results.push({
@@ -328,17 +275,14 @@ async function main() {
           const b64 = await generateImageBase64(prompt);
           const png = Buffer.from(b64, "base64");
 
-          // Save master for traceability
           const rawDir = path.join(OUT_DIR, "_raw");
           await fs.mkdir(rawDir, { recursive: true });
           await fs.writeFile(path.join(rawDir, `${baseSlug}_master.png`), png);
 
-          // Brand after per-platform resize
           await brandAndExport(png, baseSlug);
 
           const caption = `💡 ${t.caption}\n\nBuilt with #BurnaAI — clinical intelligence that saves time, boosts revenue, and keeps you compliant.\n#HealthcareAI #ClinicalWorkflows #MedTwitter #HIT #CDI`;
           const alt = `${t.title}: ${t.premise}. Caption: ${t.caption}.`;
-
           results.push({ slug: baseSlug, caption, alt });
         } catch (err) {
           console.error(`❌ Failed to generate "${t.title}":`, (err as any)?.message ?? err);
@@ -349,11 +293,6 @@ async function main() {
 
   const rows = buildScheduleRows(results, MONTH, YEAR);
   await writeScheduler(rows);
-
   console.log(`\n✅ Done. Images in ${OUT_DIR}/[x|linkedin|instagram]. Schedule: ${SCHEDULER_CSV}`);
 }
-
-main().catch(err => {
-  console.error(err);
-  process.exit(1);
-});
+main().catch(err => { console.error(err); process.exit(1); });
